@@ -76,7 +76,6 @@ class NVPLayer(ABC):
               This may be an empty tuple.
             log_det: a batch of log of the determinants.
         """
-        print(reuse)
         with tf.variable_scope(name, reuse=reuse):
             return self._forward(inputs)
 
@@ -162,7 +161,7 @@ class NVPLayer(ABC):
         Returns:
           A list of (gradient, variable) pairs.
         """
-        #assert len(latents) == self.num_latents
+        assert len(latents) == self.num_latents
         if outputs is not None:
             outputs_grad = tf.gradients(loss, outputs)[0]
             if outputs_grad is None:
@@ -205,6 +204,7 @@ class Network(NVPLayer):
         latents = []
         outputs = inputs
         log_det = tf.zeros(shape=[tf.shape(inputs)[0]], dtype=tf.float32)
+        outputs = tf.Print(outputs, [tf.shape(outputs)[0]])
         for name, layer in zip(self.layer_names, self.layers):
             outputs, sub_latents, sub_log_det = layer.forward(outputs, name=name, reuse=reuse)
             latents.extend(sub_latents)
@@ -260,6 +260,7 @@ class Network(NVPLayer):
                     else:
                         total_grads[var] = grad
                 prev_grads = [g for g, _ in vars_grad]
+            import pdb;pdb.set_trace()
             return outputs, outputs_grad, [(grad, var) for var, grad in total_grads.items()]
         
 class Squeeze(NVPLayer):

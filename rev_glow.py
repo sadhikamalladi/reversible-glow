@@ -33,6 +33,11 @@ def model(hps):
     assert len(ls) == len(l_names)
     return ls, l_names
 
+def model_dbg(hps):
+    ls = [Squeeze(), Actnorm(), Invconv(), Coupling(), Actnorm(), Invconv(), Coupling()]
+    l_names = ['squeeze', 'an1','inv1','coup1','an2','inv2','coup2']
+    return ls, l_names
+
 
 def create_experiment_directory(args):
     # write params
@@ -108,13 +113,14 @@ if __name__=='__main__':
     )
 
     # unpack labeled examples
-    x, y = dataset.x, tf.to_int64(dataset.y)
-    layers, layer_names = model(args)
+    x, y = tf.cast(dataset.x, tf.float32), tf.to_int64(dataset.y)
+    layers, layer_names = model_dbg(args)
     m = Network(layers, layer_names)
-    z_init = m.forward(x, reuse=False)
+    _, z_init, _ = m.forward(x, reuse=False)
+    _, z, logdets = m.forward(x, reuse=True)
     # run dataset.use_valid before computing validation loss
 
-    logpx, grads = log_likelihood_and_grad(m, x)
+    logpx, grads = log_likelihood_and_grad(m, x, var_list=tf.trainable_variables())
     val_loss = log_likelihood(m, x)
 
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -125,8 +131,9 @@ if __name__=='__main__':
 
     sess.run(tf.global_variables_initializer())
     sess.run(dataset.use_init)
+    print('running initialization...')
     sess.run(z_init)
-
+    
     # training loop
     cur_iter = 0
     best_valid = np.inf
@@ -140,7 +147,6 @@ if __name__=='__main__':
                 if cur_iter % args.log_iters == 0:
                     _logpx, _ = sess.run([logpx, opt], feed_dict={lr: epoch_lr})
                     print(cur_iter, _logpx)
-
                 else:
                     _ = sess.run(opt, feed_dict={lr: epoch_lr})
 
