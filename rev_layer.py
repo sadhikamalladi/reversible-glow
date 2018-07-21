@@ -32,7 +32,7 @@ class NVPLayer(ABC):
         return {}
 
     @abstractmethod
-    def _forward(self, inputs):
+    def _forward(self, x, reuse):
         """
         Apply the layer to a batch of inputs.
         Args:
@@ -49,7 +49,7 @@ class NVPLayer(ABC):
         pass
 
     @abstractmethod
-    def _inverse(self, outputs, latents):
+    def _inverse(self, y, z, reuse):
         """
         Apply the inverse of the layer.
         Args:
@@ -60,7 +60,7 @@ class NVPLayer(ABC):
         """
         pass
 
-    def forward(self, inputs, reuse, name=''):
+    def forward(self, x, reuse, name):
         """
         Apply the layer to a batch of inputs.
         Args:
@@ -77,9 +77,9 @@ class NVPLayer(ABC):
             log_det: a batch of log of the determinants.
         """
         with tf.variable_scope(name, reuse=reuse):
-            return self._forward(inputs)
+            return self._forward(x, reuse=reuse)
 
-    def inverse(self, outputs, latents, name='', reuse=False):
+    def inverse(self, y, z, reuse, name):
         """
         Apply the inverse of the layer.
         Args:
@@ -91,10 +91,10 @@ class NVPLayer(ABC):
           The recovered input batch for the layer.
         """
         with tf.variable_scope(name, reuse=reuse):
-            return self._inverse(outputs, latents)
+            return self._inverse(y, z, reuse=reuse)
 
     def backward(self, outputs, outputs_grad, latents, latents_grad, log_det_grad,
-                 var_list=None, name='', reuse=False):
+                 var_list=None, name='', reuse=True):
         """
         Compute a gradient through the layer.
         This is optimized for memory consumption.
@@ -194,25 +194,21 @@ class Network(NVPLayer):
         res = {}
         for layer in self.layers:
             res.update(layer.test_feed_dict())
-
-    def forward(self, inputs, reuse, name=''):
-        print(reuse)
-        with tf.variable_scope(name, reuse=reuse):
-            return self._forward(inputs, reuse)
     
     def _forward(self, inputs, reuse):
         latents = []
         outputs = inputs
         log_det = tf.zeros(shape=[tf.shape(inputs)[0]], dtype=tf.float32)
-        outputs = tf.Print(outputs, [tf.shape(outputs)[0]])
         for name, layer in zip(self.layer_names, self.layers):
             outputs, sub_latents, sub_log_det = layer.forward(outputs, name=name, reuse=reuse)
+            # save the latents that were discarded along the forward pass
             latents.extend(sub_latents)
             log_det = log_det + sub_log_det
+        # save the final latents to come out of the network
         latents.append(outputs)
         return None, tuple(latents), log_det
 
-    def _inverse(self, outputs, latents):
+    def _inverse(self, outputs, latents, reuse):
         assert outputs is None
         assert len(latents) == self.num_latents
         inputs = latents[-1]
@@ -223,7 +219,7 @@ class Network(NVPLayer):
                 latents = latents[:-layer.num_latents]
             else:
                 sub_latents = ()
-            inputs = layer.inverse(inputs, sub_latents, name=layer_name)
+            inputs = layer.inverse(inputs, sub_latents, name=layer_name, reuse=reuse)
         return inputs
 
     def backward(self, outputs, outputs_grad, latents, latents_grad, log_det_grad,
@@ -260,11 +256,10 @@ class Network(NVPLayer):
                     else:
                         total_grads[var] = grad
                 prev_grads = [g for g, _ in vars_grad]
-            import pdb;pdb.set_trace()
             return outputs, outputs_grad, [(grad, var) for var, grad in total_grads.items()]
         
 class Squeeze(NVPLayer):
-    def _forward(self, x, factor=2):
+    def _forward(self, x, reuse, factor=2):
         assert factor >= 1
         height, width, n_channels = gs(x)[1:]
         assert height % factor == 0 and width % factor == 0
@@ -273,7 +268,7 @@ class Squeeze(NVPLayer):
         x = tf.reshape(x, [-1, height//factor, width//factor, n_channels*factor*factor])
         return x, (), tf.zeros(tf.shape(x)[0])
 
-    def _inverse(self, y, z, factor=2):
+    def _inverse(self, y, z, reuse, factor=2):
         assert factor >= 1
         height, width, n_channels = gs(y)[1:]
         assert n_channels >= 4 and n_channels % 4 == 0
@@ -294,17 +289,13 @@ class Actnorm(NVPLayer):
         val = tf.reduce_sum(logs) * h * w
         return val
 
-    def forward(self, inputs, name='', reuse=False):
-        with tf.variable_scope(name, reuse=reuse):
-            return self._forward(inputs, init=(not reuse))
-
-    def _forward(self, x, init, eps=1e-6):
+    def _forward(self, x, reuse, eps=1e-6):
         t = tf.get_variable("t", (1, 1, 1, gs(x)[-1]), trainable=True)
         logs = tf.get_variable("logs", (1, 1, 1, gs(x)[-1]), trainable=True)
-        if init:
+        if not reuse:
             x_mean, x_var = tf.nn.moments(x, axes=[0, 1, 2], keep_dims=True)
             logs_init = tf.log(1. / (tf.sqrt(x_var) + eps))
-            t_init = -x_mean
+            t_init = - x_mean
             logsop = logs.assign(logs_init)
             top = t.assign(t_init)
             with tf.control_dependencies([logsop, top]):
@@ -313,15 +304,11 @@ class Actnorm(NVPLayer):
             an = self.compute(x, logs, t, backward=False)
 
         return an, (), self.logdet(x, logs)
-
-    def inverse(self, outputs, latents, name='layer', reuse=False):
-        with tf.variable_scope(name, reuse=reuse):
-            return self._inverse(outputs, latents, init=(not reuse))
-
-    def _inverse(self, y, z, init, eps=1e-6):
+    
+    def _inverse(self, y, z, reuse, eps=1e-6):
         t = tf.get_variable("t", (1, 1, 1, gs(y)[-1]), trainable=True)
         logs = tf.get_variable("logs", (1, 1, 1, gs(y)[-1]), trainable=True)
-        if init:
+        if not reuse:
             x_mean, x_var = tf.nn.moments(y, axes=[0, 1, 2], keep_dims=True)
             logs_init = tf.log(1. / (tf.sqrt(x_var) + eps))
             t_init = -x_mean
@@ -341,93 +328,61 @@ def split(x):
 def combine(x1, x2):
     return tf.concat([x1, x2], axis=3)
 
-def actnorm(x, name, init, backward, eps=1e-6):
-    def compute(x, logs, t):
-        if backward:
-            return (x * tf.exp(-logs)) - t
-        else:
-            return (x + t) * tf.exp(logs)
-    def logdet(x, logs):
-        h, w = x.get_shape().as_list()[1:3]
-        val = tf.reduce_sum(logs) * h * w
-        if backward:
-            return -val
-        else:
-            return val
-    with tf.variable_scope(name, reuse=(not init)):
-        t = tf.get_variable("t", (1, 1, 1, gs(x)[-1]), trainable=True)
-        logs = tf.get_variable("logs", (1, 1, 1, gs(x)[-1]), trainable=True)
-        if init:
-            x_mean, x_var = tf.nn.moments(x, axes=[0, 1, 2], keep_dims=True)
-            logs_init = tf.log(1. / (tf.sqrt(x_var) + eps))
-            t_init = -x_mean
-            logsop = logs.assign(logs_init)
-            top = t.assign(t_init)
-            with tf.control_dependencies([logsop, top]):
-                an = compute(x, logs_init, t_init)
-        else:
-            an = compute(x, logs, t)
-
-        return an
-
 
 def default_initializer(std=0.05):
     return tf.random_normal_initializer(0., std)
 
-def NN(x, name, init, backward, dim=128):
-    def conv(h, d, k, name, nonlin=True):
-        if nonlin:
-            h = tf.layers.conv2d(h, d, (k, k), (1, 1), "same",
-                                 name=name, use_bias=False,
-                                 kernel_initializer=default_initializer())
-            h = actnorm(h, name + "_an", init, backward)
-            h = tf.nn.relu(h)
-            return h
-        else:
-            h = tf.layers.conv2d(h, d, (k, k), (1, 1), "same",
-                                 name=name, use_bias=True,
-                                 kernel_initializer=tf.zeros_initializer(),
-                                 bias_initializer=tf.zeros_initializer())
-            logs = tf.get_variable("logs", shape=[1, 1, 1, d], dtype=tf.float32, initializer=tf.zeros_initializer())
-            s = tf.exp(logs)
-            return h * s
-    with tf.variable_scope(name, reuse=(not init)):
-        nc = gs(x)[-1]
-        h = conv(x, dim, 3, "h1")
-        h = conv(h, dim, 1, "h2")
-        h = conv(h, nc,  3, "h3", nonlin=False)
-    return h
-
 class Coupling(NVPLayer):
     def __init__(self, dim=32):
         self.dim = dim
-    
-    def forward(self, inputs, name='layer', reuse=False):
+        self.actnorm = Actnorm()
+        
+    def NN(self, x, name, reuse, backward):
+        def conv(h, d, k, name, nonlin=True):
+            if nonlin:
+                h = tf.layers.conv2d(h, d, (k, k), (1, 1), "same",
+                                     name=name, use_bias=False,
+                                     kernel_initializer=default_initializer())
+                if backward:
+                    h = self.actnorm.inverse(x, (), reuse=reuse, name=name+'_an')
+                else:
+                    h = self.actnorm.forward(x, reuse=reuse, name=name+'_an')[0]
+                h = tf.nn.relu(h)
+                return h
+            else:
+                h = tf.layers.conv2d(h, d, (k, k), (1, 1), "same",
+                                     name=name, use_bias=True,
+                                     kernel_initializer=tf.zeros_initializer(),
+                                     bias_initializer=tf.zeros_initializer())
+                logs = tf.get_variable("logs", shape=[1, 1, 1, d], dtype=tf.float32, initializer=tf.zeros_initializer())
+                s = tf.exp(logs)
+                return h * s
+
         with tf.variable_scope(name, reuse=reuse):
-            return self._forward(inputs, init=(not reuse))
+            nc = gs(x)[-1]
+            h = conv(x, self.dim, 3, "h1")
+            h = conv(h, self.dim, 1, "h2")
+            h = conv(h, nc,  3, "h3", nonlin=False)
+            return h
     
-    def get_vars(self, feats, init, backward, eps=1e-6):
-        logit_s = NN(feats, "logit_s", init, backward, dim=self.dim) + 2.
+    def get_vars(self, feats, reuse, backward, eps=1e-6):
+        logit_s = self.NN(feats, "logit_s", reuse, backward) + 2.
         s = tf.sigmoid(logit_s) + eps
-        t = NN(feats, "t", init, backward, dim=self.dim)
+        t = self.NN(feats, "t", reuse, backward)
         logdet = tf.reduce_sum(tf.log_sigmoid(logit_s), axis=[1, 2, 3])
         return s, t, logdet
 
-    def _forward(self, x, init):
+    def _forward(self, x, reuse):
         x1, x2 = split(x)
-        s, t, logdet = self.get_vars(x1, init, backward=False)
+        s, t, logdet = self.get_vars(x1, reuse, backward=False)
         y1 = x1
         y2 = (x2 + t) * s
         y = combine(y1, y2)
         return y, (), logdet
-
-    def inverse(self, outputs, latents, name='', reuse=True):
-        with tf.variable_scope(name, reuse=reuse):
-            return self._inverse(outputs, latents, init=(not reuse))
         
-    def _inverse(self, y, z, init):
+    def _inverse(self, y, z, reuse):
         y1, y2 = split(y)
-        s, t, logdet = self.get_vars(y1, init, backward=True)
+        s, t, logdet = self.get_vars(y1, reuse, backward=True)
         x1 = y1
         x2 = (y2 / s) - t
         x = combine(x1, x2)
@@ -438,7 +393,7 @@ def random_rotation_matrix(nc):
 
 class Invconv(NVPLayer):
     
-    def _forward(self, x, eps=1e-6):
+    def _forward(self, x, reuse, eps=1e-6):
         conv = lambda f, k: tf.nn.conv2d(f, k, [1, 1, 1, 1], "SAME")
         hh, ww, nc = gs(x)[1:]
         w = tf.get_variable("w", dtype=tf.float32, initializer=random_rotation_matrix(nc))
@@ -448,7 +403,7 @@ class Invconv(NVPLayer):
         y = conv(x, kernel)
         return y, (), logdet
 
-    def _inverse(self, y, z):
+    def _inverse(self, y, z, reuse):
         conv = lambda f, k: tf.nn.conv2d(f, k, [1, 1, 1, 1], "SAME")
         hh, ww, nc = gs(y)[1:]
         w = tf.get_variable("w", dtype=tf.float32, initializer=random_rotation_matrix(nc))
@@ -468,11 +423,11 @@ class FilterLatents(NVPLayer):
     @property
     def num_latents(self):
         return 1
-    def _forward(self, x):
+    def _forward(self, x, reuse):
         x, xi = split(x)
         return x, (xi,), tf.zeros([tf.shape(x)[0]])
 
-    def _inverse(self, y, z):
+    def _inverse(self, y, z, reuse):
         z = combine(y, z[0])
         return z
 
@@ -495,14 +450,14 @@ class ImageProcessing(NVPLayer):
         ldg = tf.reduce_sum(ldg, axis=-1)
         return ldg
         
-    def _forward(self, x):
+    def _forward(self, x, reuse):
         noisy = add_noise(x)
         s = self.alpha + (1-2*self.alpha)*noisy
         y = tf.log(s) - tf.log(1-s)
         ldgrad = self.logdetgrad(noisy)
         return y, (), ldgrad
 
-    def _inverse(self, y, z):
+    def _inverse(self, y, z, reuse):
         x = (tf.sigmoid(y) - self.alpha) / (1 - 2 * self.alpha)
         return x
 
