@@ -33,7 +33,12 @@ def gaussian_log_prob(tensor):
 def log_likelihood_and_grad(layer, inputs, pp_logdet, var_list=None, name='net'):
     output, latents, logdets = layer.forward(inputs, reuse=True, name=name)
     assert output is None, 'extraneous non-latent outputs'
-    logpx = output_log_likelihood(latents, logdets) - pp_logdet
-    logpx = - tf.reduce_mean(logpx)
-    grads = layer.gradients(output, latents, logdets, logpx, var_list=var_list, name=name)
+    logpx = output_log_likelihood(latents, logdets)
+    logpx = tf.reduce_mean(logpx)
+    grads = layer.gradients(output, latents, logdets, -logpx, var_list=var_list, name=name)
     return logpx, grads
+
+def ll(latents, logdets, var_list=None, name='net'):
+    logpx = output_log_likelihood(latents, logdets)
+    logpx = tf.reduce_mean(logpx)
+    return logpx

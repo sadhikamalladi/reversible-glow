@@ -1,6 +1,6 @@
 import tensorflow as tf
 from rev_layer import Actnorm, Invconv, Coupling, ImageProcessing, Squeeze, FilterLatents, Network
-from rev_obj import log_likelihood_and_grad, log_likelihood
+from rev_obj import ll
 import argparse
 import os
 import json
@@ -110,8 +110,8 @@ if __name__=='__main__':
         init_size=args.init_batch_size, n_labels=args.num_labels, n_valid=args.num_valid, n_bits_x=args.n_bits_x
     )
 
-    # unpack labeled examples
-    x, y = dataset.x, tf.to_int64(dataset.y)
+    # get data from iterator
+    x = dataset.x
     x, logdet_pp = utils.preprocess(x, alpha=args.alpha)
     
     layers, layer_names = model(args)
@@ -123,8 +123,8 @@ if __name__=='__main__':
     x_samp = m.inverse(None, z_samp, reuse=True, name='net')
 
     # objectives computation
-    logpx, grads = log_likelihood_and_grad(m, x, pp_logdet=logdet_pp, var_list=tf.trainable_variables(), name='net')
-    val_loss = log_likelihood(m, x, name='net') - logdet_pp
+    logpx = ll(z, logdet)
+    grads = m.gradients(None, z, logdet, -logpx, name='net')
 
     # optimizer initialization
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -191,18 +191,20 @@ if __name__=='__main__':
                     _re, _l, _, sstr = sess.run([recons_error, logpx, opt, train_summary], feed_dict={lr: epoch_lr})
                     train_writer.add_summary(sstr, cur_iter)
                     print(cur_iter, _l, _re)
-
                 else:
                     _ = sess.run(opt, feed_dict={lr: epoch_lr})
-
-                cur_iter += 1
+        
             except tf.errors.OutOfRangeError:
+                print(cur_iter)
                 print("Completed epoch {} in {}".format(epoch, time.time() - t_start))
+                if epoch % args.epochs_valid == 0:
+                    evaluate(dataset.use_test, test_writer, "Test")
+                    # if we have a validation set, get validation accuracy
+                    if dataset.use_valid is not None:
+                        valid_loss = evaluate(dataset.use_valid, valid_writer, "Valid")
+                        print(valid_loss)
                 break
+            
 
-            if epoch % args.epochs_valid == 0:
-                evaluate(dataset.use_test, test_writer, "Test")
-                # if we have a validation set, get validation accuracy
-                if dataset.use_valid is not None:
-                    valid_loss = evaluate(dataset.use_valid, valid_writer, "Valid")
-                    print(valid_loss)
+            cur_iter += 1
+

@@ -242,14 +242,13 @@ class Network(NVPLayer):
                 else:
                     sub_latents = ()
                     sub_latents_grad = ()
-                with tf.control_dependencies(prev_grads):
-                    outputs, outputs_grad, vars_grad = layer.backward(outputs,
-                                                                      outputs_grad,
-                                                                      sub_latents,
-                                                                      sub_latents_grad,
-                                                                      log_det_grad,
-                                                                      var_list=var_list,
-                                                                      name=layer_name)
+                outputs, outputs_grad, vars_grad = layer.backward(outputs,
+                                                                  outputs_grad,
+                                                                  sub_latents,
+                                                                  sub_latents_grad,
+                                                                  log_det_grad,
+                                                                  var_list=var_list,
+                                                                  name=layer_name)
                 for grad, var in vars_grad:
                     if var in total_grads:
                         total_grads[var] += grad
