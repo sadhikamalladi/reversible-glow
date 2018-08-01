@@ -9,14 +9,14 @@ from collections import defaultdict
 import math 
 
 
-def old_preprocess(x, n_bits_x=None, rand=True):
-    x = tf.cast(x, 'float32')
+def old_preprocess(x, dtype, n_bits_x=None, rand=True):
+    x = tf.cast(x, dtype)
     if n_bits_x < 8:
         x = tf.floor(x / 2 ** (8 - n_bits_x))
     n_bins = 2. ** n_bits_x
     # add [0, 1] random noise
     if rand:
-        x = x + tf.random_uniform(tf.shape(x), 0., 1.)
+        x = x + tf.random_uniform(tf.shape(x), 0., 1., dtype=x.dtype)
     else:
         x = x + .5
     x = x / n_bins - .5

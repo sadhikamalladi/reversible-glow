@@ -14,14 +14,19 @@ def model(hps):
     l_names = []
     for i in range(hps.n_levels):
         ls.append(Squeeze())
-        l_names.append('block%d/squeeze' % i)
+        block_name = f'block{i}/'
+        l_names.append(block_name+'squeeze')
         for j in range(hps.depth):
-            name = 'block%d/flow%d/' % (i,j)
+            flow_name = block_name + f'flow{j}/'
             an = Actnorm()
             inv = Invconv()
             coup = Coupling()
             flow = [an, inv, coup]
-            flow_names = [name + 'actnorm', name + 'invconv', name + 'coupling']
+            if hps.share_parameters:
+                coup_name = block_name
+            else:
+                coup_name = flow_name
+            flow_names = [flow_name + 'actnorm', flow_name + 'invconv', coup_name + 'coupling']
             ls += flow
             l_names += flow_names
         if i != hps.n_levels - 1:
@@ -58,6 +63,13 @@ def get_lr(epoch, args):
         epoch_lr *= lr_scale
         return epoch_lr
 
+
+def test_divergence(a, b, tol):
+    eqs = [np.isclose(a[i], b[i], atol=tol) for i in range(len(a))]
+    equs = [e.all() for e in eqs]
+    equs = np.array(equs)
+    return equs.all()
+
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_dir", type=str, default="/tmp/train")
@@ -81,15 +93,18 @@ if __name__=='__main__':
     parser.add_argument("--decay_factor", type=float, default=.1, help="Multiplier on learning rate")
 
     # Model hyperparams:
-    parser.add_argument("--width", type=int, default=128, help="Width of hidden layers")
-    parser.add_argument("--depth", type=int, default=8, help="Depth of network")
+    parser.add_argument("--width", type=int, default=512, help="Width of hidden layers")
+    parser.add_argument("--depth", type=int, default=32, help="Depth of network")
     parser.add_argument("--n_levels", type=int, default=3, help="Number of levels")
-    parser.add_argument("--n_bits_x", type=int, default=5, help="Number of bits of x")
+    parser.add_argument("--n_bits_x", type=int, default=3, help="Number of bits of x")
+    parser.add_argument("--share_parameters", default=False, action='store_true', help='when on, shares parameters aross coupling layers in steps of a block')
+    parser.add_argument('--time_input', default=False, action='store_true', help='when on, provides time as input to coupling layer (only use w shared params')
 
     # Finetuning arguments
     parser.add_argument("--finetune", type=int, default=0, help="if 0, then train generaitve, 1 then finetune")
     parser.add_argument("--clf_type", type=str, default="unwrap")
     parser.add_argument('--alpha', type=float, default=1e-6, help='alpha for preprocessing')
+    parser.add_argument('--precision', type=str, default='float32', help='float## (float32, float64) used as precision for the whole network')
 
     args = parser.parse_args()
     args.n_bins_x = 2.**args.n_bits_x
@@ -112,19 +127,28 @@ if __name__=='__main__':
 
     # get data from iterator
     x = dataset.x
-    x, logdet_pp = utils.preprocess(x, alpha=args.alpha)
+    x = utils.old_preprocess(x, n_bits_x=args.n_bits_x, dtype=args.precision)
     
     layers, layer_names = model(args)
     m = Network(layers, layer_names)
     _, z_init, _ = m.forward(x, reuse=False, name='net')
     _, z, logdet = m.forward(x, reuse=True, name='net')
     x_recons = m.inverse(None, z, reuse=True, name='net')
-    z_samp = [tf.random_normal(tf.shape(_z)) for _z in z]
+    z_samp = [tf.cast(tf.random_normal(tf.shape(_z)), args.precision) for _z in z]
     x_samp = m.inverse(None, z_samp, reuse=True, name='net')
 
     # objectives computation
     logpx = ll(z, logdet)
     grads = m.gradients(None, z, logdet, -logpx, name='net')
+    variables = [g[1] for g in grads]
+    real_gradients = tf.gradients(-logpx, variables)
+    """
+    noisy_grads = []
+    for g in grads:
+        noise = tf.random_uniform(g[0].shape, minval=1e-4, maxval=1e-3)
+        noisy_g = g[0] + noise
+        noisy_grads.append((noisy_g, g[1]))
+    """
 
     # optimizer initialization
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -134,9 +158,9 @@ if __name__=='__main__':
         opt = optim.apply_gradients(grads)
 
     # summaries
-    x_recons = utils.postprocess(x_recons, alpha=args.alpha)
-    x_samp = utils.postprocess(x_samp, alpha=args.alpha)
-    recons_error = tf.reduce_mean(tf.square(tf.to_float(utils.postprocess(x, alpha=args.alpha) - x_recons)))
+    x_recons = utils.old_postprocess(x_recons, n_bits_x=args.n_bits_x)
+    x_samp = utils.old_postprocess(x_samp, n_bits_x=args.n_bits_x)
+    recons_error = tf.reduce_mean(tf.square(tf.to_float(utils.old_postprocess(x, n_bits_x=args.n_bits_x) - x_recons)))
     tf.summary.image("x_sample", x_samp)
     tf.summary.image("x_recons", x_recons)
     tf.summary.image("x", x)
@@ -191,6 +215,16 @@ if __name__=='__main__':
                     _re, _l, _, sstr = sess.run([recons_error, logpx, opt, train_summary], feed_dict={lr: epoch_lr})
                     train_writer.add_summary(sstr, cur_iter)
                     print(cur_iter, _l, _re)
+                    _g, _b = sess.run([grads, real_gradients])
+                    _grads = [__g[0] for __g in _g]
+                    _grads = np.array(_grads)
+                    _b = np.array(_b)
+                    diff = np.abs(_b - _grads)
+                    diff = [np.max(d) for d in diff]
+                    max_diff = np.max(diff)
+                    max_inds = np.where(diff==max_diff)
+                    max_names = [variables[i] for i in max_inds[0]]
+                    print(f'{max_diff}: div for tensors {max_names})')
                 else:
                     _ = sess.run(opt, feed_dict={lr: epoch_lr})
         
@@ -207,4 +241,5 @@ if __name__=='__main__':
             
 
             cur_iter += 1
+
 

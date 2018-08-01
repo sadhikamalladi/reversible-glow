@@ -198,7 +198,7 @@ class Network(NVPLayer):
     def _forward(self, inputs, reuse):
         latents = []
         outputs = inputs
-        log_det = tf.zeros(shape=[tf.shape(inputs)[0]], dtype=tf.float32)
+        log_det = tf.zeros(shape=[tf.shape(inputs)[0]], dtype=inputs.dtype)
         for name, layer in zip(self.layer_names, self.layers):
             outputs, sub_latents, sub_log_det = layer.forward(outputs, name=name, reuse=reuse)
             # save the latents that were discarded along the forward pass
@@ -265,7 +265,7 @@ class Squeeze(NVPLayer):
         x = tf.reshape(x, [-1, height//factor, factor, width//factor, factor, n_channels])
         x = tf.transpose(x, [0, 1, 3, 5, 2, 4])
         x = tf.reshape(x, [-1, height//factor, width//factor, n_channels*factor*factor])
-        return x, (), tf.zeros(tf.shape(x)[0])
+        return x, (), tf.zeros(tf.shape(x)[0], dtype=x.dtype)
 
     def _inverse(self, y, z, reuse, factor=2):
         assert factor >= 1
@@ -289,8 +289,8 @@ class Actnorm(NVPLayer):
         return val
 
     def _forward(self, x, reuse, eps=1e-6):
-        t = tf.get_variable("t", (1, 1, 1, gs(x)[-1]), trainable=True)
-        logs = tf.get_variable("logs", (1, 1, 1, gs(x)[-1]), trainable=True)
+        t = tf.get_variable("t", (1, 1, 1, gs(x)[-1]), trainable=True, dtype=x.dtype)
+        logs = tf.get_variable("logs", (1, 1, 1, gs(x)[-1]), trainable=True, dtype=x.dtype)
         if not reuse:
             x_mean, x_var = tf.nn.moments(x, axes=[0, 1, 2], keep_dims=True)
             logs_init = tf.log(1. / (tf.sqrt(x_var) + eps))
@@ -305,8 +305,8 @@ class Actnorm(NVPLayer):
         return an, (), self.logdet(x, logs)
     
     def _inverse(self, y, z, reuse, eps=1e-6):
-        t = tf.get_variable("t", (1, 1, 1, gs(y)[-1]), trainable=True)
-        logs = tf.get_variable("logs", (1, 1, 1, gs(y)[-1]), trainable=True)
+        t = tf.get_variable("t", (1, 1, 1, gs(y)[-1]), trainable=True, dtype=y.dtype)
+        logs = tf.get_variable("logs", (1, 1, 1, gs(y)[-1]), trainable=True, dtype=y.dtype)
         if not reuse:
             x_mean, x_var = tf.nn.moments(y, axes=[0, 1, 2], keep_dims=True)
             logs_init = tf.log(1. / (tf.sqrt(x_var) + eps))
@@ -328,20 +328,25 @@ def combine(x1, x2):
     return tf.concat([x1, x2], axis=3)
 
 
-def default_initializer(std=0.05):
-    return tf.random_normal_initializer(0., std)
+def default_initializer(dtype, std=0.05):
+    return tf.random_normal_initializer(0., std, dtype=dtype)
 
 class Coupling(NVPLayer):
-    def __init__(self, dim=32):
+    def __init__(self, time_inp=False, dim=32, step=None):
         self.dim = dim
         self.actnorm = Actnorm()
+        self.step = step
+        self.time_inp = time_inp
+        # if we want to pass in time input, we need to provide it
+        if self.time_inp:
+            assert self.step is not None
         
     def NN(self, x, name, reuse, backward):
         def conv(h, d, k, name, nonlin=True):
             if nonlin:
                 h = tf.layers.conv2d(h, d, (k, k), (1, 1), "same",
                                      name=name, use_bias=False,
-                                     kernel_initializer=default_initializer())
+                                     kernel_initializer=default_initializer(h.dtype))
                 if backward:
                     h = self.actnorm.inverse(x, (), reuse=reuse, name=name+'_an')
                 else:
@@ -351,9 +356,9 @@ class Coupling(NVPLayer):
             else:
                 h = tf.layers.conv2d(h, d, (k, k), (1, 1), "same",
                                      name=name, use_bias=True,
-                                     kernel_initializer=tf.zeros_initializer(),
-                                     bias_initializer=tf.zeros_initializer())
-                logs = tf.get_variable("logs", shape=[1, 1, 1, d], dtype=tf.float32, initializer=tf.zeros_initializer())
+                                     kernel_initializer=tf.zeros_initializer(dtype=h.dtype),
+                                     bias_initializer=tf.zeros_initializer(dtype=h.dtype))
+                logs = tf.get_variable("logs", shape=[1, 1, 1, d], dtype=h.dtype, initializer=tf.zeros_initializer(h.dtype))
                 s = tf.exp(logs)
                 return h * s
 
@@ -388,14 +393,18 @@ class Coupling(NVPLayer):
         return x
 
 def random_rotation_matrix(nc):
-    return np.linalg.qr(np.random.randn(nc, nc))[0].astype(np.float32)
+    return np.linalg.qr(np.random.randn(nc, nc))[0]
 
 class Invconv(NVPLayer):
     
     def _forward(self, x, reuse, eps=1e-6):
         conv = lambda f, k: tf.nn.conv2d(f, k, [1, 1, 1, 1], "SAME")
         hh, ww, nc = gs(x)[1:]
-        w = tf.get_variable("w", dtype=tf.float32, initializer=random_rotation_matrix(nc))
+        if x.dtype == tf.float32:
+            nptype = np.float32
+        else:
+            nptype = np.float64
+        w = tf.get_variable("w", dtype=x.dtype, initializer=random_rotation_matrix(nc).astype(nptype))
         det = tf.matrix_determinant(w)
         logdet = tf.log(tf.abs(det) + eps) * hh * ww
         kernel = tf.reshape(w, [1, 1, nc, nc])
@@ -405,7 +414,11 @@ class Invconv(NVPLayer):
     def _inverse(self, y, z, reuse):
         conv = lambda f, k: tf.nn.conv2d(f, k, [1, 1, 1, 1], "SAME")
         hh, ww, nc = gs(y)[1:]
-        w = tf.get_variable("w", dtype=tf.float32, initializer=random_rotation_matrix(nc))
+        if y.dtype == tf.float32:
+            nptype = np.float32
+        else:
+            nptype = np.float64
+        w = tf.get_variable("w", dtype=y.dtype, initializer=random_rotation_matrix(nc).astype(nptype))
         kernel = tf.reshape(tf.matrix_inverse(w), [1, 1, nc, nc])
         x = conv(y, kernel)
         return x
@@ -424,16 +437,16 @@ class FilterLatents(NVPLayer):
         return 1
     def _forward(self, x, reuse):
         x, xi = split(x)
-        return x, (xi,), tf.zeros([tf.shape(x)[0]])
+        return x, (xi,), tf.zeros([tf.shape(x)[0]], dtype=x.dtype)
 
     def _inverse(self, y, z, reuse):
         z = combine(y, z[0])
         return z
 
 
-def add_noise(x):
-    x = tf.cast(x, tf.float32)
-    noise = tf.random_uniform(tf.shape(x))
+def add_noise(x, dtype=tf.float32):
+    x = tf.cast(x, dtype)
+    noise = tf.random_uniform(tf.shape(x), dtype=dtype)
     x = x + noise
     x = x / 256
     return x

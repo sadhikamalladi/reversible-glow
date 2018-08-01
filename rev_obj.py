@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 
 def log_likelihood(layer, inputs, init=False, name='net'):
     """
@@ -17,7 +18,7 @@ def output_log_likelihood(latents, log_dets):
     """
     log_probs = log_dets
     for latent in latents:
-        log_probs = log_probs + gaussian_log_prob(latent)
+        log_probs = log_probs + gaussian_logpdf(latent)
     return log_probs
 
 
@@ -29,6 +30,11 @@ def gaussian_log_prob(tensor):
     dist = tf.distributions.Normal(0.0, 1.0)
     # sum log prob over latent dimensions, average over batches
     return tf.reduce_mean(tf.reduce_sum(dist.log_prob(tensor), axis=[1,2,3]))
+
+def gaussian_logpdf(x, mu=0.0, logvar=0.0):
+    logp = -.5 * (np.log(2. * np.pi) + logvar + ((x - mu) ** 2) / tf.cast(tf.exp(logvar), x.dtype))
+    logp = tf.reduce_mean(tf.reduce_sum(logp, axis=[1,2,3]))
+    return logp
 
 def log_likelihood_and_grad(layer, inputs, pp_logdet, var_list=None, name='net'):
     output, latents, logdets = layer.forward(inputs, reuse=True, name=name)
