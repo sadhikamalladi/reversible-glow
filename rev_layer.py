@@ -332,25 +332,17 @@ def default_initializer(dtype, std=0.05):
     return tf.random_normal_initializer(0., std, dtype=dtype)
 
 class Coupling(NVPLayer):
-    def __init__(self, time_inp=False, dim=32, step=None):
+    def __init__(self, dim=32):
         self.dim = dim
         self.actnorm = Actnorm()
-        self.step = step
-        self.time_inp = time_inp
-        # if we want to pass in time input, we need to provide it
-        if self.time_inp:
-            assert self.step is not None
         
-    def NN(self, x, name, reuse, backward):
+    def NN(self, x, name, reuse):
         def conv(h, d, k, name, nonlin=True):
             if nonlin:
                 h = tf.layers.conv2d(h, d, (k, k), (1, 1), "same",
                                      name=name, use_bias=False,
                                      kernel_initializer=default_initializer(h.dtype))
-                if backward:
-                    h = self.actnorm.inverse(x, (), reuse=reuse, name=name+'_an')
-                else:
-                    h = self.actnorm.forward(x, reuse=reuse, name=name+'_an')[0]
+                h = self.actnorm.forward(h, reuse=reuse, name=name+'_an')[0]
                 h = tf.nn.relu(h)
                 return h
             else:
@@ -369,16 +361,16 @@ class Coupling(NVPLayer):
             h = conv(h, nc,  3, "h3", nonlin=False)
             return h
     
-    def get_vars(self, feats, reuse, backward, eps=1e-6):
-        logit_s = self.NN(feats, "logit_s", reuse, backward) + 2.
+    def get_vars(self, feats, reuse, eps=1e-6):
+        logit_s = self.NN(feats, "logit_s", reuse) + 2.
         s = tf.sigmoid(logit_s) + eps
-        t = self.NN(feats, "t", reuse, backward)
+        t = self.NN(feats, "t", reuse)
         logdet = tf.reduce_sum(tf.log_sigmoid(logit_s), axis=[1, 2, 3])
         return s, t, logdet
-
+    
     def _forward(self, x, reuse):
         x1, x2 = split(x)
-        s, t, logdet = self.get_vars(x1, reuse, backward=False)
+        s, t, logdet = self.get_vars(x1, reuse)
         y1 = x1
         y2 = (x2 + t) * s
         y = combine(y1, y2)
@@ -386,7 +378,7 @@ class Coupling(NVPLayer):
         
     def _inverse(self, y, z, reuse):
         y1, y2 = split(y)
-        s, t, logdet = self.get_vars(y1, reuse, backward=True)
+        s, t, logdet = self.get_vars(y1, True)
         x1 = y1
         x2 = (y2 / s) - t
         x = combine(x1, x2)
