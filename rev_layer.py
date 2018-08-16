@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import tensorflow as tf
+from custom_ops import matrix_exponential
 import math
 
 class NVPLayer(ABC):
@@ -358,7 +359,7 @@ class Coupling(NVPLayer):
             nc = gs(x)[-1]
             h = conv(x, self.dim, 3, "h1")
             h = conv(h, self.dim, 1, "h2")
-            h = conv(h, nc,  3, "h3", nonlin=False)
+            h = conv(x, nc,  3, "h3", nonlin=False)
             return h
     
     def get_vars(self, feats, reuse, eps=1e-6):
@@ -415,6 +416,50 @@ class Invconv(NVPLayer):
         x = conv(y, kernel)
         return x
 
+# uses a skew symmetric matrix to make the invertible 1x1 conv kernel instead of
+# QR decomposition of a random matrix
+class SkewInvconv(NVPLayer):
+    def _forward(self, x, reuse):
+        hh, ww, nc = gs(x)[1:]
+        conv = lambda f, k: tf.nn.conv2d(f, k, [1, 1, 1, 1], "SAME")
+        if x.dtype == tf.float32:
+            nptype = np.float32
+        else:
+            nptype = np.float64
+        rotation = tf.get_variable("1x1_conv_weight",
+                                   dtype=x.dtype,
+                                   initializer=random_rotation_matrix(nc).astype(nptype),
+                                   trainable=True)
+        rotation = (rotation - tf.matrix_transpose(rotation)) / 2.0  # make skew symmetric
+        rotation = matrix_exponential(rotation, name="MatrixExpFor1x1Convolution")
+
+        # since the rotation matrix is orthogonal now we know that the determinant is +/- 1 and its absolute
+        # value is 1. Hence the logarithm is 0 always
+        logdet = 0
+        _rot = tf.cast(rotation, x.dtype)
+        kernel = tf.reshape(_rot, shape=[1, 1, nc, nc])
+        y = conv(x, kernel)
+
+        return y, (), logdet
+
+    def _inverse(self, y, z, reuse):
+        conv = lambda f, k: tf.nn.conv2d(f, k, [1, 1, 1, 1], "SAME")
+        hh, ww, nc = gs(y)[1:]
+        if y.dtype == tf.float32:
+            nptype = np.float32
+        else:
+            nptype = np.float64
+        rotation = tf.get_variable("1x1_conv_weight",
+                                   dtype=y.dtype,
+                                   initializer=random_rotation_matrix(nc).astype(nptype),
+                                   trainable=True)
+        rotation = (rotation - tf.matrix_transpose(rotation)) / 2.0  # make skew symmetric
+        rotation = matrix_exponential(rotation, name="MatrixExpFor1x1Convolution")
+        _rot = tf.cast(tf.matrix_transpose(rotation), y.dtype)
+        kernel = tf.reshape(_rot, shape=[1, 1, nc, nc])
+        x = conv(y, kernel)
+
+        return x
 
 def split(x):
     nc = gs(x)[-1] // 2

@@ -9,34 +9,22 @@ from rev_layer import Network, Coupling, Invconv, Actnorm, Squeeze, FilterLatent
 def test_inverses():
     l = Coupling()
     inp = np.random.normal(size=(2, 32, 32, 3))
-    _indepth_test(l, inp)
+    init_inp = np.random.normal(size=(1024,32,32,3))
+    _inverse_test(l, init_inp, inp)
 
-def _indepth_test(layer, inputs):
-    with tf.Graph().as_default():  # pylint: disable=E1129
-        with tf.Session() as sess:
-            in_constant = tf.constant(inputs, dtype=tf.float64)
-            with tf.variable_scope('model'):
-                out, latent, _ = layer.forward(in_constant, name='layer', reuse=False)
-            with tf.variable_scope('model', reuse=True):
-                inverse = layer.inverse(out[-1], latent, name='layer', reuse=True)
-            _randomized_init(sess)
-            actual = sess.run(inverse)
-            print(np.max(np.abs(actual[-1] - sess.run(out)[-1])))
-            import pdb;pdb.set_trace()
-            assert not np.isnan(actual).any()
-            assert np.allclose(actual, inputs, atol=1e-4, rtol=1e-4)
-
-def _inverse_test(layer, inputs):
+def _inverse_test(layer, init_inp, inputs):
     with tf.Graph().as_default():  # pylint: disable=E1129
         with tf.Session() as sess:
             in_constant = tf.constant(inputs)
-            with tf.variable_scope('model'):
-                out, latent, _ = layer.forward(in_constant, name='layer', reuse=False)
+            init_constant = tf.constant(init_inp)
+            with tf.variable_scope('model', reuse=False):
+                init_op = layer.forward(init_constant, name='layer', reuse=False)
             with tf.variable_scope('model', reuse=True):
+                out, latent, _ = layer.forward(in_constant, name='layer', reuse=True)
                 inverse = layer.inverse(out, latent, name='layer', reuse=True)
-            _randomized_init(sess)
+            sess.run(tf.global_variables_initializer())
+            sess.run(init_op)
             actual = sess.run(inverse)
-            import pdb;pdb.set_trace()
             assert not np.isnan(actual).any()
             assert np.allclose(actual, inputs, atol=1e-4, rtol=1e-4)
 

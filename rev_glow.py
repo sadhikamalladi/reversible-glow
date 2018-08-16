@@ -1,5 +1,5 @@
 import tensorflow as tf
-from rev_layer import Actnorm, Invconv, Coupling, ImageProcessing, Squeeze, FilterLatents, Network
+from rev_layer import Actnorm, SkewInvconv, Coupling, ImageProcessing, Squeeze, FilterLatents, Network
 from rev_obj import ll
 import argparse
 import os
@@ -19,14 +19,10 @@ def model(hps):
         for j in range(hps.depth):
             flow_name = block_name + f'flow{j}/'
             an = Actnorm()
-            inv = Invconv()
+            inv = SkewInvconv()
             coup = Coupling()
             flow = [an, inv, coup]
-            if hps.share_parameters:
-                coup_name = block_name
-            else:
-                coup_name = flow_name
-            flow_names = [flow_name + 'actnorm', flow_name + 'invconv', coup_name + 'coupling']
+            flow_names = [flow_name + 'actnorm', flow_name + 'invconv', flow_name + 'coupling']
             ls += flow
             l_names += flow_names
         if i != hps.n_levels - 1:
@@ -105,6 +101,7 @@ if __name__=='__main__':
     parser.add_argument("--clf_type", type=str, default="unwrap")
     parser.add_argument('--alpha', type=float, default=1e-6, help='alpha for preprocessing')
     parser.add_argument('--precision', type=str, default='float32', help='float## (float32, float64) used as precision for the whole network')
+    parser.add_argument('--test_grad_divergence', action='store_true', default=False)
 
     args = parser.parse_args()
     args.n_bins_x = 2.**args.n_bits_x
@@ -212,19 +209,21 @@ if __name__=='__main__':
         while True:
             try:
                 if cur_iter % args.log_iters == 0:
+                    
                     _re, _l, _, sstr = sess.run([recons_error, logpx, opt, train_summary], feed_dict={lr: epoch_lr})
                     train_writer.add_summary(sstr, cur_iter)
                     print(cur_iter, _l, _re)
-                    _g, _b = sess.run([grads, real_gradients])
-                    _grads = [__g[0] for __g in _g]
-                    _grads = np.array(_grads)
-                    _b = np.array(_b)
-                    diff = np.abs(_b - _grads)
-                    diff = [np.max(d) for d in diff]
-                    max_diff = np.max(diff)
-                    max_inds = np.where(diff==max_diff)
-                    max_names = [variables[i] for i in max_inds[0]]
-                    print(f'{max_diff}: div for tensors {max_names})')
+                    if args.test_grad_divergence:
+                        _g, _b = sess.run([grads, real_gradients])
+                        _grads = [__g[0] for __g in _g]
+                        _grads = np.array(_grads)
+                        _b = np.array(_b)
+                        diff = np.abs(_b - _grads)
+                        diff = [np.max(d) for d in diff]
+                        max_diff = np.max(diff)
+                        max_inds = np.where(diff==max_diff)
+                        max_names = [variables[i] for i in max_inds[0]]
+                        print(f'{max_diff}: div for tensors {max_names})')
                 else:
                     _ = sess.run(opt, feed_dict={lr: epoch_lr})
         
