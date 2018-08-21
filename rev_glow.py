@@ -1,5 +1,6 @@
 import tensorflow as tf
-from rev_layer import Actnorm, SkewInvconv, Coupling, ImageProcessing, Squeeze, FilterLatents, Network
+from rev_layer import Actnorm, SkewInvconv, Coupling
+from rev_layer import Squeeze, FilterLatents, Network
 from rev_obj import ll
 import argparse
 import os
@@ -8,19 +9,18 @@ import shutil
 import utils
 import time
 import numpy as np
-from tensorflow.python.client import timeline
 
 """
-O(1) implementation of glow model. Default params are SOTA (for invertible flow models on MNIST/CIFAR/ImageNet.
+O(1) implementation of glow model. Default params are SOTA
+for invertible flow models on MNIST/CIFAR/ImageNet.
 """
+
 
 def model(hps):
     """
-    Construct a model per the specifications in the hps parameters. 
-    
+    Construct a model per the specifications in the hps parameters.
     hps: args parsed from command line to detail depth/width/scales of network
-
-    Returns the network's layer objects as a list and names associated with each layer 
+    Returns the network's layer objects as a list and layer names (scopes)
     """
     ls = []
     l_names = []
@@ -37,9 +37,11 @@ def model(hps):
             inv = SkewInvconv()
             if not hps.shared_coupling:
                 coup = Coupling(dim=hps.width)
-                coup_name = flow_name +'coupling'
+                coup_name = flow_name + 'coupling'
             flow = [an, inv, coup]
-            flow_names = [flow_name + 'actnorm', flow_name + 'invconv', coup_name]
+            flow_names = [flow_name + 'actnorm',
+                          flow_name + 'invconv',
+                          coup_name]
             ls += flow
             l_names += flow_names
         if i != hps.n_levels - 1:
@@ -49,9 +51,11 @@ def model(hps):
     assert len(ls) == len(l_names)
     return ls, l_names
 
+
 def create_experiment_directory(args):
     """
-    Creates a directory to copy the running version of the code to, the results, and the parameters.
+    Creates a directory to copy the running version of the code to,
+    the results, and the parameters. Assumes directory doesn't exist.
     """
     # write params
     with open(os.path.join(args.train_dir, "params.txt"), 'w') as f:
@@ -61,7 +65,8 @@ def create_experiment_directory(args):
     os.mkdir(code_dest_dir)
     code_dir = os.path.dirname(__file__)
     code_dir = '.' if code_dir == '' else code_dir
-    python_files = [os.path.join(code_dir, fn) for fn in os.listdir(code_dir) if fn.endswith(".py")]
+    python_files = [os.path.join(code_dir, fn)
+                    for fn in os.listdir(code_dir) if fn.endswith(".py")]
     for pyf in python_files:
         print(pyf, code_dest_dir)
         shutil.copy2(pyf, code_dest_dir)
@@ -71,80 +76,106 @@ def create_experiment_directory(args):
 
 def get_lr(epoch, args):
     """
-    Computes the learning rate for a given epoch based on the hyperparameters provided in args. 
-    args should specify the learning rate, # warmup epochs, decay factor, epochs between decays, and
+    Computes the learning rate for a given epoch based on the hyperparameters
+    provided in args. args should specify the learning rate, # warmup epochs,
+    decay factor, epochs between decays, and
     if the learning rate should be scaled or not.
 
-    Returns the learning rate for a given epoch, subject to constraints in args.
+    Returns the learning rate for a given epoch, subject to constraints in args
     """
-    epoch_lr = (args.lr * (epoch + 1) / args.epochs_warmup) if epoch < args.epochs_warmup + 1 else args.lr
+    if epoch < args.epoch_warmup + 1:
+        epoch_lr = args.lr * (epoch + 1) / args.epoch_warmup
+    else:
+        epoch_lr = args.lr
     # get decayed lr
     if args.lr_scalemode == 0:
         return epoch_lr
-    else:
-        lr_scale = args.decay_factor ** (epoch // args.epochs_decay)
-        epoch_lr *= lr_scale
-        return epoch_lr
 
-if __name__=='__main__':
+    lr_scale = args.decay_factor ** (epoch // args.epochs_decay)
+    epoch_lr *= lr_scale
+    return epoch_lr
+
+
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_dir", type=str, default="/tmp/train")
-    parser.add_argument("--dataset", type=str, default='mnist', help="Problem (mnist/cifar10/svhn)")
+    parser.add_argument("--train_dir", type=str, default="/tmp/train",
+                        help="Directory to save tensorboard data to")
+    parser.add_argument("--dataset", type=str,
+                        default='mnist', help="Problem (mnist/cifar10/svhn)")
     parser.add_argument("--num_valid", type=int, default=None,
-                        help="The number of examples to place into the validaiton set (only for svhn and cifar10)")
-    parser.add_argument("--num_labels", type=int, default=None, help="Number of labeled examples to use")
-    parser.add_argument("--load_path", type=str, default=None, help="Path for load saved checkpoint from")
-    parser.add_argument("--log_iters", type=int, default=100, help="iters per each print and summary")
+                        help="Validation size for svhn/cifar")
+    parser.add_argument("--num_labels", type=int, default=None,
+                        help="Number of labeled examples to use")
+    parser.add_argument("--load_path", type=str, default=None,
+                        help="Path for load saved checkpoint from")
+    parser.add_argument("--log_iters", type=int, default=100,
+                        help="iters per each print and summary")
 
     # Optimization hyperparams:
-    parser.add_argument("--epochs", type=int, default=100000, help="Train epoch size")
-    parser.add_argument("--batch_size", type=int, default=64, help="batch size")
-    parser.add_argument("--init_batch_size", type=int, default=1024, help="batch size for init")
-    parser.add_argument("--lr", type=float, default=0.001, help="Base learning rate")
-    parser.add_argument("--lr_scalemode", type=int, default=0, help="Type of learning rate scaling. 0=none, 1=step.")
-    parser.add_argument("--epochs_warmup", type=int, default=10, help="Warmup epochs")
-    parser.add_argument("--epochs_valid", type=int, default=1, help="Epochs between valid")
-    parser.add_argument("--epochs_backup", type=int, default=10, help="Epochs between backup saving")
-    parser.add_argument("--epochs_decay", type=int, default=250, help="Epochs between lr decay")
-    parser.add_argument("--decay_factor", type=float, default=.1, help="Multiplier on learning rate")
+    parser.add_argument("--epochs", type=int, default=100000,
+                        help="Train epoch size")
+    parser.add_argument("--batch_size", type=int, default=64,
+                        help="batch size")
+    parser.add_argument("--init_batch_size", type=int, default=1024,
+                        help="batch size for init")
+    parser.add_argument("--lr", type=float, default=0.001,
+                        help="base learning rate")
+    parser.add_argument("--lr_scalemode", type=int, default=0,
+                        help="type of learning rate scaling. 0=none, 1=step.")
+    parser.add_argument("--epochs_warmup", type=int, default=10,
+                        help="warmup epochs")
+    parser.add_argument("--epochs_valid", type=int, default=1,
+                        help="epochs between valid")
+    parser.add_argument("--epochs_backup", type=int, default=10,
+                        help="epochs between backup saving")
+    parser.add_argument("--epochs_decay", type=int, default=250,
+                        help="epochs between lr decay")
+    parser.add_argument("--decay_factor", type=float, default=.1,
+                        help="multiplier on learning rate")
 
     # Model hyperparams:
-    parser.add_argument("--width", type=int, default=512, help="Width of hidden layers")
-    parser.add_argument("--depth", type=int, default=32, help="Depth of network")
-    parser.add_argument("--n_levels", type=int, default=3, help="Number of levels")
-    parser.add_argument("--n_bits_x", type=int, default=3, help="Number of bits of x")
-    parser.add_argument("--share_parameters", default=False, action='store_true', help='when on, shares parameters aross coupling layers in steps of a block')
-    parser.add_argument('--time_input', default=False, action='store_true', help='when on, provides time as input to coupling layer (only use w shared params')
+    parser.add_argument("--width", type=int, default=512,
+                        help="width of hidden layers")
+    parser.add_argument("--depth", type=int, default=32,
+                        help="depth of network")
+    parser.add_argument("--n_levels", type=int, default=3,
+                        help="number of levels")
+    parser.add_argument("--n_bits_x", type=int, default=3,
+                        help="number of bits of x")
+    parser.add_argument('--precision', type=str, default='float32',
+                        help='(float32, float64) precision for the network')
 
-    # Finetuning arguments
-    parser.add_argument("--finetune", type=int, default=0, help="if 0, then train generaitve, 1 then finetune")
-    parser.add_argument("--clf_type", type=str, default="unwrap")
-    parser.add_argument('--alpha', type=float, default=1e-6, help='alpha for preprocessing')
-    parser.add_argument('--precision', type=str, default='float32', help='float## (float32, float64) used as precision for the whole network')
-
-    # testing parameters
-    parser.add_argument('--test_grad_divergence', action='store_true', default=False)
-    parser.add_argument('--profile', action='store_true', default=False)
-    parser.add_argument('--shared_coupling', action='store_true', default=False)
+    # Testing hyperparams:
+    parser.add_argument('--test_grad_divergence', action='store_true',
+                        default=False,
+                        help='print diff between real and computed grads')
+    parser.add_argument('--profile', action='store_true', default=False,
+                        help='run a few train ops and save profiling info')
+    parser.add_argument('--shared_coupling', action='store_true',
+                        default=False,
+                        help='shares params across coupling layers in block')
 
     args = parser.parse_args()
-    args.n_bins_x = 2.**args.n_bits_x
-    assert args.finetune in (0, 1)
-    assert args.clf_type in ("unwrap", "pool")
-    assert not os.path.exists(args.train_dir), "This directory already exists..."
+
+    # setup experiment directory, copy current code, save params
+    assert not os.path.exists(args.train_dir), "This directory already exists."
     train_writer = tf.summary.FileWriter(os.path.join(args.train_dir, "train"))
     test_writer = tf.summary.FileWriter(os.path.join(args.train_dir, "test"))
     valid_writer = tf.summary.FileWriter(os.path.join(args.train_dir, "valid"))
-    # setup experiment directory, copy current version of the code, save parameters
     create_experiment_directory(args)
-    
+
     sess = tf.Session()
 
     # pick the dataset per args
-    dataset_fn = {'svhn': utils.SVHNDataset, 'cifar10': utils.CIFAR10Dataset, 'mnist': utils.MNISTDataset}[args.dataset]
+    dataset_fn = {'svhn': utils.SVHNDataset,
+                  'cifar10': utils.CIFAR10Dataset,
+                  'mnist': utils.MNISTDataset}[args.dataset]
     dataset = dataset_fn(
         args.batch_size,
-        init_size=args.init_batch_size, n_labels=args.num_labels, n_valid=args.num_valid, n_bits_x=args.n_bits_x
+        init_size=args.init_batch_size,
+        n_labels=args.num_labels,
+        n_valid=args.num_valid,
+        n_bits_x=args.n_bits_x
     )
 
     # get data from iterator
@@ -157,7 +188,8 @@ if __name__=='__main__':
     _, z_init, _ = m.forward(x, reuse=False, name='net')
     _, z, logdet = m.forward(x, reuse=True, name='net')
     x_recons = m.inverse(None, z, reuse=True, name='net')
-    z_samp = [tf.cast(tf.random_normal(tf.shape(_z)), args.precision) for _z in z]
+    z_samp = [tf.cast(tf.random_normal(tf.shape(_z)),
+                      args.precision) for _z in z]
     x_samp = m.inverse(None, z_samp, reuse=True, name='net')
 
     # objectives computation
@@ -176,7 +208,9 @@ if __name__=='__main__':
     # summaries
     x_recons = utils.old_postprocess(x_recons, n_bits_x=args.n_bits_x)
     x_samp = utils.old_postprocess(x_samp, n_bits_x=args.n_bits_x)
-    recons_error = tf.reduce_mean(tf.square(tf.to_float(utils.old_postprocess(x, n_bits_x=args.n_bits_x) - x_recons)))
+    recons_error = tf.reduce_mean(tf.square(
+        tf.to_float(utils.old_postprocess(x, n_bits_x=args.n_bits_x) -
+                    x_recons)))
     tf.summary.image("x_sample", x_samp)
     tf.summary.image("x_recons", x_recons)
     tf.summary.image("x", x)
@@ -211,20 +245,25 @@ if __name__=='__main__':
                 print("{}: ...".format(name))
                 for val_name, val_val in zip(test_value_names, summary_values):
                     print("    {}: {}".format(val_name, val_val))
-                fd = {node: val for node, val in zip(test_values, summary_values)}
+                fd = {node: val for node, val in
+                      zip(test_values, summary_values)}
                 sstr = sess.run(test_summary, feed_dict=fd)
                 writer.add_summary(sstr, cur_iter)
                 # return loss to determine best model
                 return summary_values[0]
 
+    # profiling run
     if args.profile:
+        from tensorflow.python.client import timeline
+        # few iterations of SGD
         for i in range(3):
             run_options = tf.RunOptions(
                 trace_level=tf.RunOptions.FULL_TRACE)
             run_metadata = tf.RunMetadata()
             sess.run([opt, logpx],
-                     {lr:0.001},
+                     {lr: 0.001},
                      options=run_options, run_metadata=run_metadata)
+        # write timeline information to timeline.json
         tl = timeline.Timeline(run_metadata.step_stats)
         ctf = tl.generate_chrome_trace_format()
         with open('timeline.json', 'w') as f:
@@ -240,12 +279,19 @@ if __name__=='__main__':
             epoch_lr = get_lr(epoch, args)
             while True:
                 try:
+                    # log infomration
                     if cur_iter % args.log_iters == 0:
-
                         # main op to run training + logging
-                        _re, _l, _, sstr = sess.run([recons_error, logpx, opt, train_summary], feed_dict={lr: epoch_lr})
+                        _re, _l, _, sstr = sess.run([recons_error,
+                                                     logpx,
+                                                     opt,
+                                                     train_summary],
+                                                    feed_dict={lr: epoch_lr})
                         train_writer.add_summary(sstr, cur_iter)
                         print(cur_iter, _l, _re)
+
+                        # compute max difference between true gradients and
+                        # backward computed ones
                         if args.test_grad_divergence:
                             _g, _b = sess.run([grads, real_gradients])
                             _grads = [__g[0] for __g in _g]
@@ -254,24 +300,26 @@ if __name__=='__main__':
                             diff = np.abs(_b - _grads)
                             diff = [np.max(d) for d in diff]
                             max_diff = np.max(diff)
-                            max_inds = np.where(diff==max_diff)
+                            max_inds = np.where(diff == max_diff)
                             max_names = [variables[i] for i in max_inds[0]]
                             print(f'{max_diff}: div for tensors {max_names})')
                     else:
                         _ = sess.run(opt, feed_dict={lr: epoch_lr})
 
+                # epoch ends when we're out of data
                 except tf.errors.OutOfRangeError:
                     print(cur_iter)
-                    print("Completed epoch {} in {}".format(epoch, time.time() - t_start))
+                    print("Completed epoch {} in {}".format(epoch,
+                                                            time.time() -
+                                                            t_start))
                     if epoch % args.epochs_valid == 0:
                         evaluate(dataset.use_test, test_writer, "Test")
                         # if we have a validation set, get validation accuracy
                         if dataset.use_valid is not None:
-                            valid_loss = evaluate(dataset.use_valid, valid_writer, "Valid")
+                            valid_loss = evaluate(dataset.use_valid,
+                                                  valid_writer,
+                                                  "Valid")
                             print(valid_loss)
                     break
 
-
                 cur_iter += 1
-
-
