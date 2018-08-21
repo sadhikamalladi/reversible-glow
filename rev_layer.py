@@ -1,5 +1,5 @@
 """
-Real-valued non-volume preserving transformations.
+Real-valued non-volume preserving transformations. Includes implementations of 1x1 conv layer specific to Glow.
 """
 
 from abc import ABC, abstractmethod
@@ -183,9 +183,10 @@ class Network(NVPLayer):
     A feed-forward composition of NVP layers.
     """
 
-    def __init__(self, layers, layer_names):
+    def __init__(self, layers, layer_names, shared=False):
         self.layers = layers
         self.layer_names = layer_names
+        self.shared = shared
 
     @property
     def num_latents(self):
@@ -197,11 +198,29 @@ class Network(NVPLayer):
             res.update(layer.test_feed_dict())
     
     def _forward(self, inputs, reuse):
+        """
+        Computes the forward pass through all the layers and returns the latents
+        and log determinant of the composed transformations
+        """
         latents = []
         outputs = inputs
         log_det = tf.zeros(shape=[tf.shape(inputs)[0]], dtype=inputs.dtype)
+        if self.shared:
+            coup_names = set([n for n in self.layer_names if 'coupling' in n])
+            inds = [self.layer_names.index(n) for n in coup_names]
+            layer_ind = 0
         for name, layer in zip(self.layer_names, self.layers):
-            outputs, sub_latents, sub_log_det = layer.forward(outputs, name=name, reuse=reuse)
+            if self.shared:
+                if layer_ind in inds:
+                    true_reuse = reuse
+                elif 'coupling' in name:
+                    true_reuse = True
+                else:
+                    true_reuse = reuse
+                layer_ind += 1
+            else:
+                true_reuse = reuse
+            outputs, sub_latents, sub_log_det = layer.forward(outputs, name=name, reuse=true_reuse)
             # save the latents that were discarded along the forward pass
             latents.extend(sub_latents)
             log_det = log_det + sub_log_det
@@ -210,11 +229,15 @@ class Network(NVPLayer):
         return None, tuple(latents), log_det
 
     def _inverse(self, outputs, latents, reuse):
-        assert outputs is None
+        # make sure we get only latents into the inverse and the right number of them
+        assert outputs is None 
         assert len(latents) == self.num_latents
         inputs = latents[-1]
         latents = latents[:-1]
+        # compute the inverse for all the layers in the network
         for layer_name, layer in reversed(list(zip(self.layer_names, self.layers))):
+            # special case: latents and outputs are different in layer (some latents are
+            # discarded between scale blocks)
             if layer.num_latents > 0:
                 sub_latents = latents[-layer.num_latents:]
                 latents = latents[:-layer.num_latents]
@@ -333,9 +356,11 @@ def default_initializer(dtype, std=0.05):
     return tf.random_normal_initializer(0., std, dtype=dtype)
 
 class Coupling(NVPLayer):
-    def __init__(self, dim=32):
+    def __init__(self, dim=32, step=0, shared=False):
         self.dim = dim
         self.actnorm = Actnorm()
+        self.step = step
+        self.shared = shared
         
     def NN(self, x, name, reuse):
         def conv(h, d, k, name, nonlin=True):
@@ -366,7 +391,7 @@ class Coupling(NVPLayer):
         logit_s = self.NN(feats, "logit_s", reuse) + 2.
         s = tf.sigmoid(logit_s) + eps
         t = self.NN(feats, "t", reuse)
-        logdet = tf.reduce_sum(tf.log_sigmoid(logit_s), axis=[1, 2, 3])
+        logdet = tf.reduce_sum(tf.log_sigmoid(logit_s), axis=[1, 2, 3]) + tf.cast(tf.log(eps), feats.dtype)
         return s, t, logdet
     
     def _forward(self, x, reuse):
