@@ -27,3 +27,6 @@ To profile speed, use `--profile` to run the network for a few SGD steps. Then, 
 To share parameters across coupling layers within the same scale block, use `--shared_coupling`.
 
 To test how numerical precision errors propagate and cause the computed gradients to diverge from the true ones, use `--test_grad_divergence`. Keep in mind that enabling this flag will force the gradients to be computed as they normally are, which makes the implementation no longer constant memory.
+
+## Acknowledgements
+Thanks to unixpickle and wgrathwohl for code support. Code was written and tested during an internship at OpenAI.
